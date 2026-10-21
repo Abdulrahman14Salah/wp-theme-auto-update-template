@@ -1,0 +1,124 @@
+name: Auto Release
+
+# Reusable auto-release pipeline for a WordPress theme backed by GitHub.
+# Set THEME_SLUG once below (no dot — WordPress core strips dots from theme
+# slugs in its own update handlers, which silently breaks updates). It must
+# match get_template() on the live site, i.e. the theme's folder name.
+
+env:
+  THEME_SLUG: my-theme-slug # <-- CHANGE ME (no dots, matches the installed folder name)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "SETUP.md"
+      - ".github/**"
+      - "update-manifest.json"
+
+permissions:
+  contents: write
+
+jobs:
+  auto-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          if [ -z "$latest_tag" ]; then
+            latest_tag="1.0.0"
+          fi
+          echo "Latest tag: v$latest_tag"
+          IFS='.' read -r major minor patch <<< "$latest_tag"
+          patch=$((patch + 1))
+          next="$major.$minor.$patch"
+          echo "Next version: $next"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+
+      - name: Update style.css version
+        run: |
+          awk -v v="${{ steps.version.outputs.version }}" '
+          BEGIN{found=0}
+          /^Version:/ {$0="Version: " v; found=1}
+          {print}
+          END{if(!found) print "Version: " v}
+          ' style.css > tmp
+          mv tmp style.css
+
+      - name: Create theme folder
+        run: |
+          mkdir "$THEME_SLUG"
+          rsync -av ./ "$THEME_SLUG/" \
+          --exclude=".git" \
+          --exclude=".github" \
+          --exclude="node_modules" \
+          --exclude=".idea" \
+          --exclude="README.md" \
+          --exclude="SETUP.md" \
+          --exclude="*.patch" \
+          --exclude="$THEME_SLUG"
+
+      - name: Create zip package
+        run: zip -r "$THEME_SLUG.zip" "$THEME_SLUG"
+
+      - name: Create release with zip attached
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "$THEME_SLUG.zip" \
+            --title "Version ${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --target "${{ github.sha }}"
+
+      # --- PUBLIC REPOS ONLY ---
+      # Delete this whole step for a private client repo. Private repos
+      # should instead set MYTHEME_UPDATE_API in config.php to
+      # https://api.github.com/repos/{user}/{repo}/releases/latest and rely
+      # on an authenticated token (5000 req/hour) — no public manifest file
+      # is needed, and raw.githubusercontent.com can't serve a private repo
+      # without auth anyway.
+      - name: "Publish update-manifest.json (public repos only - bypasses rate limits)"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo="${{ github.repository }}"
+          tag="${{ steps.version.outputs.tag }}"
+          slug="$THEME_SLUG"
+          html_url="https://github.com/$repo/releases/tag/$tag"
+          download_url="https://github.com/$repo/releases/download/$tag/$slug.zip"
+          notes=$(gh release view "$tag" --json body -q .body)
+
+          python3 - "$tag" "$html_url" "$download_url" "$notes" "$slug" <<'PY'
+          import json, sys
+          tag, html_url, download_url, notes, slug = sys.argv[1:6]
+          manifest = {
+              "tag_name": tag,
+              "html_url": html_url,
+              "body": notes,
+              "assets": [
+                  {
+                      "name": f"{slug}.zip",
+                      "browser_download_url": download_url,
+                  }
+              ],
+          }
+          with open("update-manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update-manifest.json
+          git commit -m "chore: update manifest for ${{ steps.version.outputs.tag }}"
+          git push origin main

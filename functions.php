@@ -50,11 +50,10 @@ mytheme_autoload_inc();
 |--------------------------------------------------------------------------
 | GitHub Auto-Updater
 |--------------------------------------------------------------------------
+| Update checking does NOT live here anymore. It lives in a separate,
+| standalone plugin ("GitHub Theme Updater") so the update code never has
+| to survive replacing the very folder it's running from. Install it once
+| per site and point it at this theme's slug + repo in
+| Settings → GitHub Theme Updater.
+| https://github.com/Abdulrahman14Salah/github-theme-updater
 */
-
-add_action('after_setup_theme', function () {
-
-    if (class_exists('MyTheme_GitHub_Updater')) {
-        new MyTheme_GitHub_Updater();
-    }
-});
